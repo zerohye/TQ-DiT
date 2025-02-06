@@ -1,6 +1,3 @@
-import sys
-sys.path.append('/home/yhwang/PTQD/PTQ4DiT')
-
 from timm.models.layers import config
 from torch.nn.modules import module
 from quant_layers.conv import MinMaxQuantConv2d
@@ -30,49 +27,29 @@ from importlib import reload,import_module
 import argparse
 import utils.integer as integer
 
-
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 os.environ["TORCH_USE_CUDA_DSA"] = '1'
 
-def test_all(name, args, cfg_modifier=lambda x: x, calib_size=32, config_name="PTQ4ViT"):
+def test_all(name, args, cfg_modifier=lambda x: x, calib_size=32, config_name="TQ-DiT"):
     args.device = "cuda:"+str(args.gpu) if torch.cuda.is_available() else "cpu"
     args.cfg_scale = 1.5
+    args.image_size = 256
     quant_cfg = init_config(config_name)
     quant_cfg = cfg_modifier(quant_cfg) 
-    if config_name=="PTQ4ViT":
-        if not quant_cfg.no_SoL:
-            config_name = config_name+"SOL"
     batch_size = 4
-
-    if name == "DiT-S/2":
-        args.ckpt = '/home/yhwang/PTQD/DiT/results/013-DiT-S-2/checkpoints/0250000.pt'
-        path = "DiT-S-2"
-    elif name == "DiT-XL/2":
-        path = "DiT-XL-2"
-    
-    args.image_size = 256
-    print(args)
-    net = get_net(name, args.image_size, args.num_classes, args.device, args.ckpt)
-    latent_size = args.image_size // 8
     group_num = 10
+    latent_size = args.image_size // 8
     args.group_num = group_num
-    
-
+    net = get_net(name, args.image_size, args.num_classes, args.device, args.ckpt)
+    if name == "DiT-XL/2":
+        path = "DiT-XL-2"
     wrapped_modules=net_wrap.wrap_modules_in_net(net,quant_cfg)
 
     # for DiT
-    extraction = "random" # dataset extraction method ("random" or "uniform class" or "timewise" or "random timewise")
+    extraction = "random timewise" # dataset extraction method ("random" or "uniform class" or "timewise" or "random timewise")
     args.extraction = extraction
-    if extraction == "random" or extraction == "random timewise":
-        # dataset_path = f'imagenet_input_{args.num_sampling_steps}steps_256.pth'
-        # dataset_path = "imagenet_input_50steps_256_c250.pth" # num_sampling_steps 50
-        # dataset_path = "imagenet_input_100steps_256.pth" # num_sampling_steps 100
-        dataset_path = "imagenet_input_250steps.pth" # num_sampling_steps 250
-    else:
-        dataset_path = 'imagenet_input_250steps_timestep1000_size2.pth'
+    dataset_path = "imagenet_input_250steps.pth" 
     dataset = DiffusionInputDataset(dataset_path, calib_size = calib_size, extraction=extraction, group_num = group_num, timestep = args.num_sampling_steps)
-    # data_loader = DataLoader(dataset=dataset, batch_size=8, shuffle=True)
     data_loader = calib_loader(dataset=dataset, num_samples=calib_size, batch_size=calib_size, extraction=extraction, group_num = group_num)
     
     # add timing
@@ -80,8 +57,8 @@ def test_all(name, args, cfg_modifier=lambda x: x, calib_size=32, config_name="P
     calib_start_time = time.time()
     torch.cuda.reset_peak_memory_stats(device=args.device)
     
-    quant_calibrator = HessianQuantCalibrator(net,wrapped_modules,data_loader,sequential=False,batch_size=batch_size) # 16 is too big for ViT-L-16
-    if config_name=="PTQ4ViTtime" or extraction == "random timewise":
+    quant_calibrator = HessianQuantCalibrator(net,wrapped_modules,data_loader,sequential=False,batch_size=batch_size)
+    if config_name=="TQ-DiT" or extraction == "random timewise":
         quant_calibrator.batching_quant_calib_timestep(args)
     else:
         quant_calibrator.batching_quant_calib(args)
@@ -107,7 +84,7 @@ def test_all(name, args, cfg_modifier=lambda x: x, calib_size=32, config_name="P
                 intervals[m_name+'.B_zero'] = module.B_zero
             if 'matmul2' in m_name:
                 if hasattr(module,'split'):
-                    intervals[m_name+'.split'] = module.split # REVISED at 0828
+                    intervals[m_name+'.split'] = module.split 
         else:
             intervals[m_name+'.w_interval'] = module.w_interval
             intervals[m_name+'.a_interval'] = module.a_interval
@@ -115,14 +92,13 @@ def test_all(name, args, cfg_modifier=lambda x: x, calib_size=32, config_name="P
                 intervals[m_name+'.w_zero'] = module.w_zero
             if hasattr(module,'a_zero'):
                 intervals[m_name+'.a_zero'] = module.a_zero
-    date="1212"
-    torch.save(intervals, 'results/{}_intervals_W{}A{}_{}_{}_seed{}_{}step_{}group.pth'.format(path, cfg_modifier.bit_setting[0],cfg_modifier.bit_setting[1],config_name,date,args.seed,args.num_sampling_steps,args.group_num))
+    torch.save(intervals, 'results/{}_intervals_W{}A{}_{}_seed{}_{}step_{}group.pth'.format(path, cfg_modifier.bit_setting[0],cfg_modifier.bit_setting[1],config_name,args.seed,args.num_sampling_steps,args.group_num))
 
     if args.sample:
         diffusion = create_diffusion(str(args.num_sampling_steps), group_num=args.group_num)
         vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(args.device)
-        outpath = "./quick_samples/{}_intervals_W{}A{}_{}_{}_seed{}_{}step".format(path, cfg_modifier.bit_setting[0],cfg_modifier.bit_setting[1],config_name,date,args.seed,args.num_sampling_steps)
-        if config_name=="PTQ4ViTtime":
+        outpath = "./quick_samples/{}_intervals_W{}A{}_{}_seed{}_{}step".format(path, cfg_modifier.bit_setting[0],cfg_modifier.bit_setting[1],config_name,args.seed,args.num_sampling_steps)
+        if config_name=="TQ-DiT":
             outpath=outpath+f"_{args.group_num}group"
         if not os.path.exists(outpath):
             os.makedirs(outpath)
@@ -141,10 +117,9 @@ def test_all(name, args, cfg_modifier=lambda x: x, calib_size=32, config_name="P
         y = torch.cat([y, y_null], 0)
         model_kwargs = dict(y=y, cfg_scale=args.cfg_scale)
 
-        # 메모리, 시간 비교
         import torchprofile
-        torch.cuda.reset_peak_memory_stats()  # 메모리 사용량 초기화
-        torch.cuda.empty_cache()  # 캐시 정리
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.empty_cache()
         start_time = time.time()
 
         # Sample images:
@@ -226,31 +201,28 @@ def parse_args():
     parser.add_argument("--num-sampling-steps", type=int, default=250)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--sample", action="store_true", default=True, help="sample images")
-    parser.add_argument("--ckpt", type=str, default='/home/yhwang/PTQD/PTQ4DiT/pretrained_models/DiT-XL-2-256x256.pt',
-                        help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).")
+    parser.add_argument("--ckpt", type=str, default='../pretrained_models/DiT-XL-2-256x256.pt')
     args = parser.parse_args()
     return args
 
 if __name__=='__main__':    
     args = parse_args()
-    names = [
-        "DiT-XL/2"]
-    metrics = [
-        "L2_norm", "hessian", "cosine"]
+    names = ["DiT-XL/2"]
+    metrics = ["hessian", "L2_norm", "cosine"]
     linear_ptq_settings = [(1,1,1)] # n_V, n_H, n_a
-    calib_sizes = [32,128]
-    bit_settings = [(8,8),(6,6),(4,8)] # weight, activation
-    # config_names = ["PTQ4ViTtime", "PTQ4ViTLIS", "PTQ4ViT", "BasePTQ","MSEPTQ"]
-    config_names = ["PTQ4ViT"]
+    calib_sizes = [32]
+    bit_settings = [(8,8),(6,6)] # weight, activation
+    # config_names = ["TQ-DiT", "HessianPTQ", "BasePTQ","MSEPTQ"]
+    config_names = ["TQ-DiT"]
 
     cfg_list = []
     for name, metric, linear_ptq_setting, calib_size, bit_setting, config_name in product(names, metrics, linear_ptq_settings, calib_sizes, bit_settings, config_names):
-        if "PTQ4ViT" in config_name:
+        if config_name == "BasePTQ":
             metric = "hessian"
-        elif config_name == "BasePTQ":
-            metric = "hessian" #0930 for 통신학회 paper
         elif config_name == "MSEPTQ":
             metric = "L2_norm"
+        else 
+            metric = "hessian"
             
         cfg_list.append({
             "name": name,
